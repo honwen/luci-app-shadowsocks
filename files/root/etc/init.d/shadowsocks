@@ -10,7 +10,8 @@ START=90
 STOP=15
 
 NAME=shadowsocks
-EXTRA_COMMANDS=rules
+EXTRA_COMMANDS="rules watchdog"
+CRON_FILE=/etc/crontabs/root
 
 uci_get_by_name() {
 	local ret=$(uci get $NAME.$1.$2 2>/dev/null)
@@ -120,6 +121,15 @@ start_rules() {
 		-a "$(config_foreach get_lan_hosts lan_hosts)" \
 		-e "$(uci_get_by_type access_control ipt_ext)" \
 		$(get_arg_out) $(get_arg_udp)
+
+	if [ "Z$?" = "Z0" -a "Z$(uci_get_by_type access_control wan_bp_list)" = "Z/dev/flag_gfwlist" ]; then
+		[ $(ipset list gfwlist | wc -l) -lt 1 ] && /etc/init.d/dnsmasq-extra restart
+		idx=$(($(iptables -t nat -L SS_SPEC_WAN_AC | grep all | sed -n -e '/ss_spec_dst_bp/=') +1))
+		iptables -t nat    -I SS_SPEC_WAN_AC $idx -m set ! --match-set gfwlist dst -j RETURN 2>/dev/null \
+			|| echo "# Transparent Proxy: TCP    NOT ENABLED"
+		iptables -t mangle -I SS_SPEC_WAN_AC $idx -m set ! --match-set gfwlist dst -j RETURN 2>/dev/null \
+			|| echo "# Transparent Proxy: UDP    NOT ENABLED"
+	fi
 }
 
 rules() {
@@ -140,6 +150,21 @@ ss_redir() {
 	local main_server=$(uci_get_by_type transparent_proxy main_server)
 	has_valid_server $main_server || return 1
 	local udp_relay_server=$(uci_get_by_type transparent_proxy udp_relay_server)
+
+	rm -rf /var/dnsmasq.d/ss.conf
+	for server in $main_server; do
+		uci_get_by_name $server server | sed "s/^/server=\//;s/$/\/114.114.115.115/"    >> /var/dnsmasq.d/ss.conf
+		uci_get_by_name $server server | sed "s/^/server=\//;s/$/\/208.67.222.222#443/" >> /var/dnsmasq.d/ss.conf
+	done
+
+	for server in $udp_relay_server; do
+		uci_get_by_name $server server | sed "s/^/server=\//;s/$/\/114.114.115.115/"    >> /var/dnsmasq.d/ss.conf
+		uci_get_by_name $server server | sed "s/^/server=\//;s/$/\/208.67.222.222#443/" >> /var/dnsmasq.d/ss.conf
+	done
+
+	( sort -u /var/dnsmasq.d/ss.conf  | sed '/\/\//d' > /var/dnsmasq.d/ss-servers.conf ) && rm -f /var/dnsmasq.d/ss.conf
+	/etc/init.d/dnsmasq restart
+
 	if [ "$udp_relay_server" = "same" ]; then
 		for server in $main_server; do
 			start_redir $server -u
@@ -190,6 +215,7 @@ start() {
 	ss_redir && rules
 	ss_local
 	ss_tunnel
+	has_valid_server $(uci_get_by_type transparent_proxy main_server) && add_cron
 }
 
 boot() {
@@ -209,4 +235,58 @@ stop() {
 		kill_all $(sort -u /var/run/ss-plugin)
 		rm -f /var/run/ss-plugin
 	fi
+	rm -f /var/dnsmasq.d/ss.conf /var/dnsmasq.d/ss-servers.conf 2>/dev/null
+	del_cron
+}
+
+add_cron() {
+	sed -i '/shadowsocks_watchdog/d' $CRON_FILE
+	echo '0   */3   * * *  rm -f /var/log/shadowsocks_watchdog.log 2>&1' >> $CRON_FILE
+	echo '*    *    * * * /etc/init.d/shadowsocks watchdog >> /var/log/shadowsocks_watchdog.log 2>&1' >> $CRON_FILE
+	/etc/init.d/cron restart
+}
+
+del_cron() {
+	sed -i '/shadowsocks_watchdog/d' $CRON_FILE
+	/etc/init.d/cron restart
+}
+
+watchdog(){
+	command -v ss-redir >/dev/null 2>&1 || return 1
+	local main_server=$(uci_get_by_type transparent_proxy main_server)
+	has_valid_server $main_server || return 1
+
+	LOGTIME=$(date "+%Y-%m-%d %H:%M:%S")
+	TRPORT=$(uci_get_by_type transparent_proxy local_port 1234)
+	GOOGLE=$(ping -4 www.gstatic.com -c 1 -w 5 2>/dev/null | sed '1{s/[^(]*(//;s/).*//;q}')
+
+	if [ "Z$GOOGLE" = "Z" ]; then
+		echo '['$LOGTIME'] Problem-DNS decteted, restarting shadowsocks...'
+		[ -f /etc/init.d/dnsmasq-extra ] && /etc/init.d/dnsmasq-extra restart || /etc/init.d/dnsmasq restart
+		stop  >/dev/null 2>&1
+		start >/dev/null 2>&1
+		return 0
+	fi
+
+	iptables -t nat -I OUTPUT -p tcp -d $GOOGLE -j REDIRECT --to-port $TRPORT
+	wget --spider --quiet --tries=1 --timeout=3 $GOOGLE/generate_204 2>/dev/null ||
+		curl --connect-timeout 2 --max-time 7 -s $GOOGLE/generate_204 2>/dev/null ||
+		wget -s -q -T3 $GOOGLE/generate_204
+	if [ "Z$?" = "Z0" ]; then
+		echo '['$LOGTIME'] shadowsocks No Problem.'
+	else
+		wget --spider --quiet --tries=1 --timeout=3 'www.qq.com/robots.txt' 2>/dev/null ||
+			curl --connect-timeout 2 --max-time 7 -s 'www.qq.com/robots.txt' 2>/dev/null ||
+			wget -s -q -T3 'www.qq.com/robots.txt'
+		if [ "Z$?" = "Z0" ]; then
+			echo '['$LOGTIME'] Problem decteted, restarting shadowsocks...'
+			stop  >/dev/null 2>&1
+			start >/dev/null 2>&1
+		else
+			echo '['$LOGTIME'] Network Problem. Do nothing.'
+		fi
+	fi
+
+	iptables -t nat -D OUTPUT -p tcp -d $GOOGLE -j REDIRECT --to-port $TRPORT
+	return 0
 }
