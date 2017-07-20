@@ -182,12 +182,16 @@ gen_prerouting_rules() {
 while getopts ":s:l:S:L:B:b:W:w:I:d:a:e:oOuUfh" arg; do
 	case "$arg" in
 		s)
+			# wait-for-dns, timeout 10s
+			for _ in `seq 10`; do if ping -4 t.cn -c 1 -w 5 >/dev/null 2>&1; then break; else sleep 1; fi; done
 			server=$(for ip in $OPTARG; do echo $ip; done)
 			;;
 		l)
 			local_port=$OPTARG
 			;;
 		S)
+			# wait-for-dns, timeout 10s
+			for _ in `seq 10`; do if ping -4 t.cn -c 1 -w 5 >/dev/null 2>&1; then break; else sleep 1; fi; done
 			SERVER=$(for ip in $OPTARG; do echo $ip; done)
 			;;
 		L)
