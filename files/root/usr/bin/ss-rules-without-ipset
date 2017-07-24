@@ -44,12 +44,11 @@ loger() {
 }
 
 flush_rules() {
-	if [ 0 -lt $(uname -a | grep -ce "[Gg]argoyle") ]; then
-		iptables-save -c | grep -v "SS_SPEC" | sed '/[^ ]--/d' | uniq | iptables-restore -c
-		ls /etc/init.d/*_gargoyle 2>/dev/null | while read init; do $init restart >/dev/null 2>&1; done
-	else
-		iptables-save -c | grep -v "SS_SPEC" | uniq | iptables-restore -c
-	fi
+	iptables-save -c | grep -v "SS_SPEC" | sed '/[^ ]--/d' | uniq | iptables-restore -c
+	uci -q show firewall | sed -n 's/.*path=//p' | sed -n '/gargoyle/p' | tr -d \' | while read init; do
+		sh $init restart >/dev/null 2>&1
+	done
+
 	if command -v ip >/dev/null 2>&1; then
 		ip rule del fwmark 1 lookup 100 2>/dev/null
 		ip route del local default dev lo table 100 2>/dev/null
@@ -94,12 +93,11 @@ ipt_mangle() {
 export_ipt_rules() {
 	[ -n "$FWI" ] || return 0
 	cat <<-CAT >>$FWI
-	if [ 0 -lt $(uname -a | grep -ce "[Gg]argoyle") ]; then
-		iptables-save -c | grep -v "SS_SPEC" | sed '/[^ ]--/d' | uniq | iptables-restore -c
-		ls /etc/init.d/*_gargoyle 2>/dev/null | while read init; do $init restart >/dev/null 2>&1; done
-	else
-		iptables-save -c | grep -v "SS_SPEC" | uniq | iptables-restore -c
-	fi
+	iptables-save -c | grep -v "SS_SPEC" | sed '/[^ ]--/d' | uniq | iptables-restore -c
+	uci -q show firewall | sed -n 's/.*path=//p' | sed -n '/gargoyle/p' | tr -d \' | while read init; do
+		sh $init restart >/dev/null 2>&1
+	done
+
 	iptables-restore -n <<-EOF
 	$(iptables-save | grep -E "SS_SPEC|^\*|^COMMIT" |\
 			sed -e "s/^-A \(OUTPUT\|PREROUTING\)/-I \1 1/")
