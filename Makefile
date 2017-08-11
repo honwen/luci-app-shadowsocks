@@ -29,13 +29,10 @@ define Package/luci-app-shadowsocks/Default
 endef
 
 Package/luci-app-shadowsocks = $(call Package/luci-app-shadowsocks/Default,+ipset)
-Package/luci-app-shadowsocks-without-ipset = $(call Package/luci-app-shadowsocks/Default)
 
 define Package/luci-app-shadowsocks/description
 	LuCI Support for shadowsocks-libev.
 endef
-
-Package/luci-app-shadowsocks-without-ipset/description = $(Package/luci-app-shadowsocks/description)
 
 define Build/Prepare
 	$(foreach po,$(wildcard ${CURDIR}/files/luci/i18n/*.po), \
@@ -60,13 +57,9 @@ fi
 exit 0
 endef
 
-Package/luci-app-shadowsocks-without-ipset/postinst = $(Package/luci-app-shadowsocks/postinst)
-
 define Package/luci-app-shadowsocks/conffiles
 /etc/config/shadowsocks
 endef
-
-Package/luci-app-shadowsocks-without-ipset/conffiles = $(Package/luci-app-shadowsocks/conffiles)
 
 define Package/luci-app-shadowsocks/install
 	$(INSTALL_DIR) $(1)/usr/lib/lua/luci/i18n
@@ -87,7 +80,4 @@ define Package/luci-app-shadowsocks/install
 	$(INSTALL_BIN) ./files/root/usr/bin/ss-rules$(2) $(1)/usr/bin/ss-rules
 endef
 
-Package/luci-app-shadowsocks-without-ipset/install = $(call Package/luci-app-shadowsocks/install,$(1),-without-ipset)
-
 $(eval $(call BuildPackage,luci-app-shadowsocks))
-$(eval $(call BuildPackage,luci-app-shadowsocks-without-ipset))
