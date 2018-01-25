@@ -41,8 +41,19 @@ loger() {
 	logger -st ss-rules[$$] -p$1 $2
 }
 
+fw_reinit() {
+	uci -q show firewall | sed -n 's/.*path=//p' | sed -n '/adbyby\|koolproxy\|dnsmasq/p' | tr -d \' | while read init; do
+		sh $init restart >/dev/null 2>&1
+	done
+	return 0
+}
+
 flush_rules() {
-	iptables-save -c | grep -v "SS_SPEC" | iptables-restore -c
+	iptables-save -c | grep -v "SS_SPEC" | sed '/[^ ]--/d' | uniq | iptables-restore -c
+	uci -q show firewall | sed -n 's/.*path=//p' | sed -n '/gargoyle/p' | tr -d \' | while read init; do
+		sh $init restart >/dev/null 2>&1
+	done
+
 	if command -v ip >/dev/null 2>&1; then
 		ip rule del fwmark 1 lookup 100 2>/dev/null
 		ip route del local default dev lo table 100 2>/dev/null
@@ -104,11 +115,17 @@ ipt_mangle() {
 export_ipt_rules() {
 	[ -n "$FWI" ] || return 0
 	cat <<-CAT >>$FWI
-	iptables-save -c | grep -v "SS_SPEC" | iptables-restore -c
+	iptables-save -c | grep -v "SS_SPEC" | sed '/[^ ]--/d' | uniq | iptables-restore -c
+
 	iptables-restore -n <<-EOF
 	$(iptables-save | grep -E "SS_SPEC|^\*|^COMMIT" |\
 			sed -e "s/^-A \(OUTPUT\|PREROUTING\)/-I \1 1/")
 	EOF
+
+	uci -q show firewall | sed -n 's/.*path=//p' | sed -n '/gargoyle\|adbyby\|koolproxy\|dnsmasq/p' | tr -d \' | while read init; do
+		sh \$init restart >/dev/null 2>&1
+	done
+	return 0
 CAT
 	return $?
 }
@@ -156,6 +173,7 @@ EOF
 }
 
 include_ac_rules() {
+	ipt_chain=$1
 	local protocol=$([ "$1" = "mangle" ] && echo udp || echo tcp)
 	iptables-restore -n <<-EOF
 	*$1
@@ -175,6 +193,11 @@ include_ac_rules() {
 	$(gen_prerouting_rules $protocol)
 	COMMIT
 EOF
+	if [ "Z${WAN_BP_LIST}" = "Z/dev/flag_gfwlist" ]; then
+		[ $(ipset list -n | grep -c gfwlist) -lt 1 ] && /etc/init.d/dnsmasq-extra restart
+		idx=$(($(iptables -t $ipt_chain -L SS_SPEC_WAN_AC | grep all | sed -n -e '/ss_spec_dst_bp/=') +1))
+		iptables -t $ipt_chain -I SS_SPEC_WAN_AC $idx -m set ! --match-set gfwlist dst -j RETURN
+	fi
 }
 
 gen_prerouting_rules() {
@@ -187,13 +210,13 @@ gen_prerouting_rules() {
 while getopts ":s:l:S:L:B:b:W:w:I:d:a:e:oOuUfh" arg; do
 	case "$arg" in
 		s)
-			server=$(for ip in $OPTARG; do echo $ip; done)
+			server=$(for host in $OPTARG; do ping $host -c 1 -w 1 | sed '1{s/[^(]*(//;s/).*//;q}' ; done)
 			;;
 		l)
 			local_port=$OPTARG
 			;;
 		S)
-			SERVER=$(for ip in $OPTARG; do echo $ip; done)
+			SERVER=$(for host in $OPTARG; do ping $host -c 1 -w 1 | sed '1{s/[^(]*(//;s/).*//;q}' ; done)
 			;;
 		L)
 			LOCAL_PORT=$OPTARG
@@ -254,7 +277,7 @@ elif [ "$TPROXY" = 2 ]; then
 	: ${LOCAL_PORT:?"You must assign a port for the udp relay server."}
 fi
 
-flush_rules && ipset_init && ipt_nat && ipt_mangle && export_ipt_rules
+flush_rules && ipset_init && ipt_nat && ipt_mangle && fw_reinit && export_ipt_rules
 RET=$?
 [ "$RET" = 0 ] || loger 3 "Start failed!"
 exit $RET

@@ -10,7 +10,9 @@ START=90
 STOP=15
 
 NAME=shadowsocks
-EXTRA_COMMANDS=rules
+EXTRA_COMMANDS="rules watchdog"
+CRON_FILE=/etc/crontabs/root
+DNSMASQDIR=/var/dnsmasq.d
 
 uci_get_by_name() {
 	local ret=$(uci get $NAME.$1.$2 2>/dev/null)
@@ -109,6 +111,29 @@ EOF
 	echo $config_file
 }
 
+ss_pre() {
+	DNSMASQCONF=$DNSMASQDIR/ss.conf
+	echo "all-servers" > $DNSMASQCONF
+	config_load $NAME
+	for server in $(config_foreach get_server_ips servers); do
+		cat <<-EOF >> $DNSMASQCONF
+		ipset=/${server}/ss_spec_dst_sp
+		server=/${server}/#
+		server=/${server}/114.114.114.114
+		server=/${server}/114.114.115.115
+		server=/${server}/208.67.220.220#5353
+		server=/${server}/208.67.222.222#443
+EOF
+	done
+
+	( sort -u $DNSMASQCONF | sed '/\/\//d; /\/127.0.0.1\//d' > /var/dnsmasq.d/ss-servers.conf ) && rm -f $DNSMASQCONF
+
+	echo "server=/accounts.gstatic.com/127.0.0.1#$(uci_get_by_type port_forward local_port 5300)" >> /var/dnsmasq.d/ss-servers.conf
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	# wait-for-dns, timeout 10s
+	for _ in `seq 10`; do if ping -4 t.cn -c 1 -w 1 >/dev/null 2>&1; then break; fi; done
+}
+
 start_rules() {
 	config_load $NAME
 	/usr/bin/ss-rules \
@@ -190,13 +215,16 @@ ss_tunnel() {
 
 start() {
 	pidof ss-redir ss-local ss-tunnel >/dev/null && return 0
-	mkdir -p /var/run /var/etc
+	mkdir -p /var/run /var/etc $DNSMASQDIR
+	has_valid_server $(uci_get_by_type transparent_proxy main_server) && ss_pre
 	ss_redir && rules
 	ss_local
 	ss_tunnel
+	has_valid_server $(uci_get_by_type transparent_proxy main_server) && add_cron
 }
 
 boot() {
+	echo 'exit 0' > /var/etc/$NAME.include
 	local delay=$(uci_get_by_type general startup_delay 0)
 	(sleep $delay && start >/dev/null 2>&1) &
 	return 0
@@ -213,4 +241,73 @@ stop() {
 		kill_all $(sort -u /var/run/ss-plugin)
 		rm -f /var/run/ss-plugin
 	fi
+	rm -f /var/dnsmasq.d/ss.conf /var/dnsmasq.d/ss-servers.conf 2>/dev/null
+	del_cron
+}
+
+add_cron() {
+	sed -i '/shadowsocks_watchdog/d' $CRON_FILE
+	echo '0   */3   * * *  rm -f /var/log/shadowsocks_watchdog.log 2>&1' >> $CRON_FILE
+	echo '*    *    * * * /etc/init.d/shadowsocks watchdog >> /var/log/shadowsocks_watchdog.log 2>&1' >> $CRON_FILE
+	/etc/init.d/cron restart
+}
+
+del_cron() {
+	sed -i '/shadowsocks_watchdog/d' $CRON_FILE
+	/etc/init.d/cron restart
+}
+
+watchdog(){
+	command -v ss-redir >/dev/null 2>&1 || return 1
+	local main_server=$(uci_get_by_type transparent_proxy main_server)
+	has_valid_server $main_server || return 1
+
+	cat_connect() {
+		target="$1"
+		timeout=5
+		ret_code=$(curl -s --connect-timeout $timeout "$target" -w %{http_code} -o /dev/null | tail -n1)
+		# echo $ret_code
+		[ "x$ret_code" = "x200" -o "x$ret_code" = "x204" ] && return 0 || return 1
+	}
+
+	LOGTIME=$(date "+%Y-%m-%d %H:%M:%S")
+	TRPORT=$(uci_get_by_type transparent_proxy local_port 1234)
+	GOOGLE=$(ping -4 accounts.gstatic.com -c 1 -w 1 2>/dev/null | sed '1{s/[^(]*(//;s/).*//;q}')
+	DNSPOD=119.29.29.29 #DNSPOD HTTPDNS (Inside GFW)
+
+	if [ "Z$GOOGLE" = "Z" ]; then
+		iptables -t nat -I OUTPUT -p tcp -d $DNSPOD -j RETURN
+		cat_connect "http://${DNSPOD}/d?dn=qq.com"
+		if [ "Z$?" = "Z0" ]; then
+			echo "[${LOGTIME}] Problem-DNS decteted, restarting ${NAME}..."
+			[ -x /etc/init.d/dnsmasq-extra ] && /etc/init.d/dnsmasq-extra restart || /etc/init.d/dnsmasq restart
+			stop  >/dev/null 2>&1
+			start >/dev/null 2>&1
+		else
+			echo '['$LOGTIME'] Network Problem. Do nothing.'
+		fi
+		iptables -t nat -D OUTPUT -p tcp -d $DNSPOD -j RETURN
+		return 0
+	fi
+
+	iptables -t nat -I OUTPUT -p tcp -d $GOOGLE -j REDIRECT --to-port $TRPORT
+	iptables -t nat -I OUTPUT -p tcp -d $DNSPOD -j RETURN
+	cat_connect "http://${GOOGLE}/generate_204"
+	if [ "Z$?" = "Z0" ]; then
+		echo "[${LOGTIME}] ${NAME} No Problem."
+	else
+		cat_connect '119.29.29.29/d?dn=qq.com'
+		if [ "Z$?" = "Z0" ]; then
+			echo "[${LOGTIME}] Problem decteted, restarting ${NAME}..."
+			[ -x /etc/init.d/haproxy-tcp ] && /etc/init.d/haproxy-tcp restart
+			stop  >/dev/null 2>&1
+			start >/dev/null 2>&1
+		else
+			echo '['$LOGTIME'] Network Problem. Do nothing.'
+		fi
+	fi
+
+	iptables -t nat -D OUTPUT -p tcp -d $GOOGLE -j REDIRECT --to-port $TRPORT
+	iptables -t nat -D OUTPUT -p tcp -d $DNSPOD -j RETURN
+	return 0
 }
