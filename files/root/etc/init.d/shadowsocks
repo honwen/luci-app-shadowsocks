@@ -122,8 +122,9 @@ ss_pre() {
 		cat <<-EOF >> $tmpDNSconf
 		ipset=/${server}/ss_spec_dst_sp
 		server=/${server}/#
+		server=/${server}/1.1.8.9
 		server=/${server}/114.114.114.114
-		server=/${server}/114.114.115.115
+		server=/${server}/80.80.80.80
 		server=/${server}/208.67.220.220#5353
 		server=/${server}/208.67.222.222#443
 EOF
